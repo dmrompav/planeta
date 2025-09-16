@@ -11,8 +11,8 @@ export const CountryOverlay = () => {
 
   return (
     <>
-      <div className="absolute z-10 bg-black/5"></div>
-      <div className="absolute top-0 left-0 w-full h-full rounded-lg p-6 bg-background/85 text-foreground shadow-lg">
+      <div className="absolute bg-background/85 w-full h-full"></div>
+      <div className="absolute top-0 left-0 w-full h-full rounded-lg p-6 text-foreground shadow-lg">
         {isPending && (
           <div className="text-sm text-muted-foreground">Загрузка…</div>
         )}
@@ -49,7 +49,7 @@ export const CountryOverlay = () => {
             </ul>
           </>
         )}
-        <div className="mt-4 flex justify-end">
+        <div className="mt-4 flex justify-start">
           <button
             onClick={() => setSelected(null)}
             className="rounded bg-primary px-3 py-1 text-sm"

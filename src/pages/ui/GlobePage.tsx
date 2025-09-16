@@ -10,6 +10,7 @@ import { AppSidebar } from '@/widgets/AppSidebar/AppSidebar';
 import { CountryOverlay } from '@/widgets/CountryOverlay/CountryOverlay';
 import { Globe3D } from '@/widgets/Globe3D/Globe3D';
 import { useSelectedCountry } from '@/entities/country/model/store';
+import { ThemeToggle } from '@/shared/ui/_shadcn/theme-toggle';
 
 export const GlobePage = () => {
   const isMobile = useIsMobile();
@@ -42,16 +43,21 @@ export const GlobePage = () => {
       <AppSidebar />
       <SidebarInset className="overflow-hidden relative">
         <header className="top-0 z-20 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="flex items-center gap-2 p-2">
-            <SidebarTrigger className="mr-1" />
-            <div className="font-semibold">PlanetA</div>
+          <div className="flex items-center justify-between gap-2 p-2">
+            <div className="flex items-center gap-2">
+              <SidebarTrigger className="mr-1" />
+              <div className="font-semibold">PlanetA</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <ThemeToggle />
+            </div>
           </div>
         </header>
 
         {/* Контейнер для canvas и overlay */}
         <div className="flex-1 relative !m-0 h-[100dvh]">
           <Globe3D
-            className="absolute inset-0 w-full h-full bg-black"
+            className="absolute inset-0 w-full h-full bg-background"
             selectedCca2={selectedCca2}
             setSelectedCca2={setSelected}
           />

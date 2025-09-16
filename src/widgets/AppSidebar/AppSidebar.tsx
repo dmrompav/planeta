@@ -1,4 +1,5 @@
 import { useCountriesQuery } from '@/entities/country/hooks/queries';
+import type { Country } from '@/entities/country/model/types';
 import { useSelectedCountry } from '@/entities/country/model/store';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import {
@@ -15,7 +16,14 @@ import { useState, useMemo } from 'react';
 
 export const AppSidebar = () => {
   const { data, isPending, isError } = useCountriesQuery();
+  const list = useMemo(() => (data ?? []) as Country[], [data]);
   const [q, setQ] = useState('');
+  const [region, setRegion] = useState<string>('');
+  const [subregion, setSubregion] = useState<string>('');
+  const [popMin, setPopMin] = useState<string>('');
+  const [popMax, setPopMax] = useState<string>('');
+  const [areaMin, setAreaMin] = useState<string>('');
+  const [areaMax, setAreaMax] = useState<string>('');
 
   const { selectedCca2, setSelected } = useSelectedCountry();
 
@@ -23,18 +31,74 @@ export const AppSidebar = () => {
   const isMobile = useIsMobile();
 
   const filtered = useMemo(() => {
-    if (!data) return [];
+    if (!list) return [] as Country[];
     const s = q.trim().toLowerCase();
-    let arr = data;
+    let arr = list;
 
-    if (s) {
-      arr = arr.filter((c) => c.name.common.toLowerCase().includes(s));
-    }
+    // text search
+    if (s) arr = arr.filter((c) => c.name.common.toLowerCase().includes(s));
+
+    // region filter
+    if (region) arr = arr.filter((c) => (c.region ?? '') === region);
+
+    // subregion filter
+    if (subregion) arr = arr.filter((c) => (c.subregion ?? '') === subregion);
+
+    // numeric filters: population
+    const pMin = Number(popMin || NaN);
+    const pMax = Number(popMax || NaN);
+    if (!Number.isNaN(pMin))
+      arr = arr.filter((c) =>
+        typeof c.population === 'number' ? c.population >= pMin : false
+      );
+    if (!Number.isNaN(pMax))
+      arr = arr.filter((c) =>
+        typeof c.population === 'number' ? c.population <= pMax : false
+      );
+
+    // numeric filters: area
+    const aMin = Number(areaMin || NaN);
+    const aMax = Number(areaMax || NaN);
+    if (!Number.isNaN(aMin))
+      arr = arr.filter((c) =>
+        typeof c.area === 'number' ? c.area >= aMin : false
+      );
+    if (!Number.isNaN(aMax))
+      arr = arr.filter((c) =>
+        typeof c.area === 'number' ? c.area <= aMax : false
+      );
 
     return [...arr].sort((a, b) =>
       a.name.common.localeCompare(b.name.common, 'en', { sensitivity: 'base' })
     );
-  }, [data, q]);
+  }, [list, q, region, subregion, popMin, popMax, areaMin, areaMax]);
+
+  // unique regions and subregions for selects
+  const regions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of list) if (c.region) set.add(c.region);
+    return [...set].sort();
+  }, [list]);
+
+  const subregions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of list) {
+      if (region) {
+        if (c.region === region && c.subregion) set.add(c.subregion as string);
+      } else if (c.subregion) set.add(c.subregion as string);
+    }
+    return [...set].sort();
+  }, [list, region]);
+
+  const resetFilters = () => {
+    setQ('');
+    setRegion('');
+    setSubregion('');
+    setPopMin('');
+    setPopMax('');
+    setAreaMin('');
+    setAreaMax('');
+  };
 
   const handleSelect = (cca2: string) => {
     setSelected(cca2);
@@ -62,11 +126,62 @@ export const AppSidebar = () => {
       </SidebarHeader>
 
       <SidebarContent className="overflow-y-auto">
+        <div className="p-2 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="number"
+              min={0}
+              value={popMin}
+              onChange={(e) => setPopMin(e.target.value)}
+              placeholder="Pop min"
+              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+            />
+            <input
+              type="number"
+              min={0}
+              value={popMax}
+              onChange={(e) => setPopMax(e.target.value)}
+              placeholder="Pop max"
+              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="number"
+              min={0}
+              value={areaMin}
+              onChange={(e) => setAreaMin(e.target.value)}
+              placeholder="Area min"
+              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+            />
+            <input
+              type="number"
+              min={0}
+              value={areaMax}
+              onChange={(e) => setAreaMax(e.target.value)}
+              placeholder="Area max"
+              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+            />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <button
+              onClick={resetFilters}
+              className="rounded-md px-2 py-1 text-sm hover:bg-muted"
+            >
+              Reset
+            </button>
+            <div className="text-xs text-muted-foreground">
+              {filtered.length} items
+            </div>
+          </div>
+        </div>
         {isPending && (
-          <div className="p-2 text-sm text-muted-foreground">Загрузка…</div>
+          <div className="p-2 text-sm text-muted-foreground">Loading...</div>
         )}
         {isError && (
-          <div className="p-2 text-sm text-red-500">Ошибка загрузки</div>
+          <div className="p-2 text-sm text-red-500">Loading error</div>
         )}
 
         <ul className="divide-y text-sm">

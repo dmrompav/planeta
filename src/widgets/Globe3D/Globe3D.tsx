@@ -73,12 +73,13 @@ const AUTO = {
 const STARS = {
   count: 2800,
   radius: 60,
-  size: 0.45,
+  size: 0.15, // ← как просил
   opacity: 0.9,
+  followFactor: 1.0, // 1 = двигаются точно как планета; 0.6 = легкий параллакс
 } as const;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Вспомогательные функции
+/** Гео-утилиты */
 
 const lonLatToVec3 = (lonDeg: number, latDeg: number, radius: number) => {
   const lon = THREE.MathUtils.degToRad(lonDeg);
@@ -665,8 +666,13 @@ export const Globe3D = ({
     );
     world.add(globe);
 
+    // Звезды — отдельная группа + кватернион-фоллов за миром
+    const starGroup = new THREE.Group();
     const stars = createStars();
-    scene.add(stars);
+    starGroup.add(stars);
+    scene.add(starGroup);
+
+    const worldQuatPrev = new THREE.Quaternion().copy(world.quaternion);
 
     const highlightRef: { current: THREE.Group | null } = { current: null };
     const setHighlight = (f: FeatureIdx | null) => {
@@ -784,13 +790,15 @@ export const Globe3D = ({
     };
 
     const applyDrag = (dx: number, dy: number) => {
+      // Горизонталь → вращение вокруг СВОЕЙ оси Y (суточное вращение)
       const yaw = dx * NAV.dragYawPerPx;
-      qYaw.setFromAxisAngle(axisLocalY, yaw);
+      qYaw.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
       world.quaternion.multiply(qYaw); // локальный yaw
 
-      const right = getCameraRight();
+      // Вертикаль → наклон относительно оси "вправо" от мира (не камеры!)
       const pitch = dy * NAV.dragPitchPerPx;
-      qPitch.setFromAxisAngle(right, pitch);
+      const axisRight = new THREE.Vector3(1, 0, 0); // глобальная "правая"
+      qPitch.setFromAxisAngle(axisRight, pitch);
       world.quaternion.premultiply(qPitch); // мировой pitch
 
       world.quaternion.normalize();
@@ -940,21 +948,33 @@ export const Globe3D = ({
       const dt = (t - lastT) / 1000;
       lastT = t;
 
+      // Обновляем мир (фокус/авто)
       focuser.update(t);
       idle.update(t, dt);
 
+      // Камера — длина вектора (зум)
       if (camDistRef.current > 0) camera.position.setLength(camDistRef.current);
       camera.lookAt(0, 0, 0);
+
+      // Звезды: следуют за вращением планеты (по инкременту кватерниона)
+      const dq = new THREE.Quaternion()
+        .copy(worldQuatPrev.clone().invert())
+        .multiply(world.quaternion);
+
+      if (dq.w !== 1 || dq.x !== 0 || dq.y !== 0 || dq.z !== 0) {
+        // «scale» вращения через интерполяцию
+        const scaled = new THREE.Quaternion().copy(new THREE.Quaternion()); // identity
+        scaled.slerp(dq, STARS.followFactor);
+
+        starGroup.quaternion.multiply(scaled);
+        worldQuatPrev.copy(world.quaternion);
+      }
 
       renderer.render(scene, camera);
     });
 
     return () => {
       ac.abort();
-      const parent = dom.parentElement;
-      if (parent) {
-        // noop, just to keep TypeScript happy if you later attach more nodes
-      }
 
       dom.removeEventListener('pointerdown', onPointerDown);
       dom.removeEventListener('pointerup', onPointerUp);
@@ -965,7 +985,8 @@ export const Globe3D = ({
       dom.removeEventListener('wheel', onWheel);
 
       renderer.setAnimationLoop(null);
-      disposeAll(scene);
+      disposeAll(starGroup);
+      disposeAll(world);
       renderer.dispose();
       mapTex.dispose();
       stopResize();
