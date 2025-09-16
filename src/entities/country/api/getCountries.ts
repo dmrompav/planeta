@@ -3,6 +3,10 @@ const BASE = 'https://restcountries.com/v3.1';
 export type HttpError = { status: number; message: string };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  // Debug: log the final URL in development to help track duplicate/malformed requests
+  if (process.env.NODE_ENV !== 'production') {
+    console.debug('[restcountries] request URL:', url);
+  }
   const res = await fetch(url, { ...init, headers: { ...init?.headers } });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

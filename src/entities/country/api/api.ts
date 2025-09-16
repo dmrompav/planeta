@@ -2,7 +2,7 @@ import type { Country, CountryShort } from '../model/types';
 import { restCountries } from './getCountries';
 
 const FIELDS =
-  'name,cca2,cca3,region,subregion,capital,population,area,latlng,flags,languages,currencies,timezones,tld';
+  'name,cca2,flags,region,subregion,population,capital,area,languages';
 
 export const fetchAllCountries = () =>
   restCountries.all<CountryShort[]>(FIELDS);

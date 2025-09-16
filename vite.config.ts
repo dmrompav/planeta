@@ -5,6 +5,7 @@ import * as path from 'path';
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/planeta/',
   plugins: [react(), tailwindcss()],
 
   resolve: {

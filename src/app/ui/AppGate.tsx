@@ -18,9 +18,7 @@ export default function AppGate({ children }: { children: React.ReactNode }) {
   }, [qc]);
 
   if (err)
-    return (
-      <div className="p-4 text-red-600">Ошибка загрузки: {String(err)}</div>
-    );
+    return <div className="p-4 text-red-600">Loading error: {String(err)}</div>;
   if (!ready) return <Splash />;
 
   return <Suspense fallback={<Splash />}>{children}</Suspense>;
@@ -29,7 +27,7 @@ export default function AppGate({ children }: { children: React.ReactNode }) {
 function Splash() {
   return (
     <div style={{ minHeight: '100dvh' }} className="grid place-items-center">
-      <div>Загрузка…</div>
+      <div>Loading...</div>
     </div>
   );
 }
