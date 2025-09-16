@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { CSSProperties, MutableRefObject } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type {
   FeatureCollection,
   Polygon as GJPolygon,
@@ -58,15 +57,24 @@ const COLORS = {
 const NAV = {
   minDistance: 1.2,
   maxDistance: 6,
-  rotateSpeed: 0.9,
-  zoomSpeed: 0.8,
+  dragYawPerPx: 0.004, // горизонтальный drag: вращение вокруг локальной оси Y
+  dragPitchPerPx: 0.004, // вертикальный drag: наклон вокруг правой оси камеры
+  wheelZoomStrength: 0.0018,
+  pinchZoomStrength: 0.008,
   clickPxTolerance: 6,
   clickMsTolerance: 300,
 } as const;
 
 const AUTO = {
-  degPerSec: 0.8, // скорость автоворота
-  idleMs: 1200, // пауза простоя перед стартом
+  degPerSec: 0.8,
+  idleMs: 1200,
+} as const;
+
+const STARS = {
+  count: 2800,
+  radius: 60,
+  size: 0.45,
+  opacity: 0.9,
 } as const;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -282,18 +290,15 @@ function createMapTexture(renderer: THREE.WebGLRenderer) {
       ctx.restore();
     };
 
-    // базовый слой земель
     for (const f of features) {
       if (f === selectedF || f === hoverF) continue;
       for (const p of f.polygons) fillPoly(p, COLORS.land, 1);
     }
 
-    // hover — полупрозрачно
     if (hoverF && hoverF !== selectedF) {
       for (const p of hoverF.polygons) fillPoly(p, COLORS.hoverFill, 0.35);
     }
 
-    // selected — полностью
     if (selectedF) {
       for (const p of selectedF.polygons) fillPoly(p, COLORS.selectedFill, 1);
     }
@@ -320,32 +325,24 @@ function createRenderer(canvas: HTMLCanvasElement) {
   return { renderer, setDPR };
 }
 
-// Сцена/камера/контролы
-function createScene(renderer: THREE.WebGLRenderer) {
+// Сцена/камера
+function createScene() {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
   camera.position.set(0, 0, 3);
-
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.enablePan = false;
-  controls.rotateSpeed = NAV.rotateSpeed;
-  controls.zoomSpeed = NAV.zoomSpeed;
-  controls.minDistance = NAV.minDistance;
-  controls.maxDistance = NAV.maxDistance;
+  camera.lookAt(0, 0, 0);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const dir = new THREE.DirectionalLight(0xffffff, 0.9);
   dir.position.set(5, 2, 4);
   scene.add(dir);
 
-  return { scene, camera, controls };
+  return { scene, camera };
 }
 
 // Подгон расстояния камеры так, чтобы сфера влезала по меньшей стороне
 function fitCameraToSphere(
   camera: THREE.PerspectiveCamera,
-  controls: OrbitControls,
   radius: number,
   aspect: number,
   margin = 1.05
@@ -354,15 +351,8 @@ function fitCameraToSphere(
   const dVert = radius / Math.tan(halfV);
   const dHorz = radius / (Math.tan(halfV) * aspect);
   const dist = Math.max(dVert, dHorz) * margin;
-
-  camera.position.setLength(dist);
-
-  controls.minDistance = dist * 0.8;
-  controls.maxDistance = dist * 4;
-
+  camera.position.set(0, 0, dist);
   camera.updateProjectionMatrix();
-  controls.update();
-
   return dist;
 }
 
@@ -371,8 +361,11 @@ function createResizeWatcher(
   canvas: HTMLCanvasElement,
   renderer: THREE.WebGLRenderer,
   camera: THREE.PerspectiveCamera,
-  controls: OrbitControls,
-  setDPR: () => void
+  setDPR: () => void,
+  baseDistRef: MutableRefObject<number>,
+  camDistRef: MutableRefObject<number>,
+  minDistRef: MutableRefObject<number>,
+  maxDistRef: MutableRefObject<number>
 ) {
   const doResize = () => {
     const parent = canvas.parentElement ?? document.body;
@@ -380,9 +373,22 @@ function createResizeWatcher(
     const h = parent.clientHeight || window.innerHeight;
 
     renderer.setSize(w, h, true);
-
     camera.aspect = w / h;
-    fitCameraToSphere(camera, controls, R * 1.01, camera.aspect, 1.06);
+
+    const base = fitCameraToSphere(camera, R * 1.01, camera.aspect, 1.06);
+    baseDistRef.current = base;
+    minDistRef.current = NAV.minDistance * base;
+    maxDistRef.current = NAV.maxDistance * base;
+
+    // если ещё не было зума — ставим базовую дистанцию
+    if (camDistRef.current === 0) camDistRef.current = base;
+    camDistRef.current = THREE.MathUtils.clamp(
+      camDistRef.current,
+      minDistRef.current,
+      maxDistRef.current
+    );
+    camera.position.setLength(camDistRef.current);
+
     setDPR();
   };
 
@@ -435,7 +441,7 @@ function createPicker(
   return { pickAt };
 }
 
-// Выбор «главного» полигона (аппрокс. по площади bbox с поправкой на широту)
+// Выбор «главного» полигона
 const primaryPolygon = (polys: PolygonIdx[]) => {
   let best: PolygonIdx | null = null;
   let bestScore = -Infinity;
@@ -454,7 +460,7 @@ const primaryPolygon = (polys: PolygonIdx[]) => {
   return best!;
 };
 
-// Направление на страну: усредняем юнит-векторы внешнего контура
+// Направление на страну
 const featureDirection = (f: FeatureIdx): THREE.Vector3 => {
   const poly = primaryPolygon(f.polygons);
   const sum = new THREE.Vector3(0, 0, 0);
@@ -470,14 +476,9 @@ const featureDirection = (f: FeatureIdx): THREE.Vector3 => {
   return sum.normalize();
 };
 
-// Фокусировщик: плавный поворот МИРА на выбранную страну (ориентируемся на взгляд камеры)
-function createFocuser(
-  world: THREE.Group,
-  camera: THREE.PerspectiveCamera,
-  controls: OrbitControls
-) {
-  const viewAxis = () =>
-    camera.position.clone().sub(controls.target).normalize();
+// Фокусировщик
+function createFocuser(world: THREE.Group, camera: THREE.PerspectiveCamera) {
+  const viewAxisToCamera = () => camera.position.clone().normalize();
 
   let anim: {
     t0: number;
@@ -491,7 +492,7 @@ function createFocuser(
 
   const start = (dirLocal: THREE.Vector3, ms = 650) => {
     const dirWorld = world.localToWorld(dirLocal.clone()).normalize();
-    const target = viewAxis();
+    const target = viewAxisToCamera();
     const dq = new THREE.Quaternion().setFromUnitVectors(dirWorld, target);
     const from = world.quaternion.clone();
     const to = dq.multiply(from);
@@ -510,29 +511,29 @@ function createFocuser(
     if (t >= 1) anim = null;
   };
 
-  const isActive = () => !!anim;
+  const isActive = () => anim !== null;
 
   return { start, cancel, update, isActive };
 }
 
 // Звёздный фон
-function createStars(count = 1800, radius = 50) {
+function createStars() {
   const geom = new THREE.BufferGeometry();
-  const positions = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
+  const positions = new Float32Array(STARS.count * 3);
+  for (let i = 0; i < STARS.count; i++) {
     const v = new THREE.Vector3()
       .randomDirection()
-      .multiplyScalar(radius * (0.95 + Math.random() * 0.1));
+      .multiplyScalar(STARS.radius * (0.95 + Math.random() * 0.1));
     positions[i * 3 + 0] = v.x;
     positions[i * 3 + 1] = v.y;
     positions[i * 3 + 2] = v.z;
   }
   geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   const mat = new THREE.PointsMaterial({
-    size: 0.15,
+    size: STARS.size,
     sizeAttenuation: true,
     transparent: true,
-    opacity: 0.85,
+    opacity: STARS.opacity,
     depthWrite: false,
   });
   const stars = new THREE.Points(geom, mat);
@@ -551,6 +552,8 @@ function createIdleAuto(
 ) {
   let interacting = false;
   let lastInputAt = performance.now();
+  const qTmp = new THREE.Quaternion();
+  const axisLocalY = new THREE.Vector3(0, 1, 0);
 
   const markInput = () => {
     lastInputAt = performance.now();
@@ -567,30 +570,33 @@ function createIdleAuto(
   const update = (now: number, dtSec: number) => {
     if (interacting) return;
     if (opts.focuserActive()) return;
-    if (opts.selectedRef.current) return; // не крутим, когда есть выбранная страна
-    if (opts.hoveredRef.current) return; // и пока есть hover
+    if (opts.selectedRef.current) return;
+    if (opts.hoveredRef.current) return;
     if (now - lastInputAt < AUTO.idleMs) return;
 
-    world.rotation.y += THREE.MathUtils.degToRad(AUTO.degPerSec) * dtSec;
+    const ang = THREE.MathUtils.degToRad(AUTO.degPerSec) * dtSec;
+    qTmp.setFromAxisAngle(axisLocalY, ang);
+    world.quaternion.multiply(qTmp); // локальный yaw
   };
 
   return { onStart, onEnd, markInput, update };
 }
 
-// Type guards для освобождения ресурсов
-type HasGeomMat = THREE.Mesh | THREE.Line | THREE.Points;
-const hasGeomMat = (o: THREE.Object3D): o is HasGeomMat => {
-  const m = o as unknown as { geometry?: unknown; material?: unknown };
-  return m.geometry !== undefined || m.material !== undefined;
-};
-
+// Очистка ресурсов без any
 function disposeAll(root: THREE.Object3D) {
   root.traverse((obj) => {
-    if (hasGeomMat(obj)) {
-      if ((obj as any).geometry) (obj as any).geometry.dispose();
-      const mat = (obj as any).material;
-      if (Array.isArray(mat)) mat.forEach((mm) => mm.dispose());
-      else if (mat) mat.dispose();
+    if (obj instanceof THREE.Mesh) {
+      obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+      else obj.material.dispose();
+    } else if (obj instanceof THREE.Line) {
+      obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+      else obj.material.dispose();
+    } else if (obj instanceof THREE.Points) {
+      obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+      else obj.material.dispose();
     }
   });
 }
@@ -615,6 +621,13 @@ export const Globe3D = ({
   const applySelectionRef = useRef<(f: FeatureIdx | null) => void>(null);
 
   const setSelectedRef = useRef<Globe3DProps['setSelectedCca2']>(null);
+
+  // камера/дистанции — ВСЕ рефы объявлены на верхнем уровне (не внутри коллбэков)
+  const baseDistRef = useRef<number>(0);
+  const camDistRef = useRef<number>(0);
+  const minDistRef = useRef<number>(0);
+  const maxDistRef = useRef<number>(0);
+
   useEffect(() => {
     setSelectedRef.current = setSelectedCca2;
   }, [setSelectedCca2]);
@@ -627,7 +640,7 @@ export const Globe3D = ({
 
     const { renderer, setDPR } = createRenderer(canvas);
     renderer.domElement.style.touchAction = 'none';
-    const { scene, camera, controls } = createScene(renderer);
+    const { scene, camera } = createScene();
 
     const world = new THREE.Group();
     scene.add(world);
@@ -652,12 +665,10 @@ export const Globe3D = ({
     );
     world.add(globe);
 
-    // звёзды (в сцене, а не в world — чтобы ощущался автоворот)
     const stars = createStars();
     scene.add(stars);
 
-    // borders highlight
-    const highlightRef = { current: null as THREE.Group | null };
+    const highlightRef: { current: THREE.Group | null } = { current: null };
     const setHighlight = (f: FeatureIdx | null) => {
       if (highlightRef.current) {
         world.remove(highlightRef.current);
@@ -680,8 +691,7 @@ export const Globe3D = ({
       highlightRef.current = g;
     };
 
-    // Фокусировщик + автоворот по простоям
-    const focuser = createFocuser(world, camera, controls);
+    const focuser = createFocuser(world, camera);
     const idle = createIdleAuto(world, {
       selectedRef,
       hoveredRef,
@@ -694,12 +704,12 @@ export const Globe3D = ({
       if (idxRef.current)
         drawMap(idxRef.current, selectedRef.current, hoveredRef.current);
       if (f) {
-        const dir = featureDirection(f); // локальный
-        focuser.start(dir); // повернём мир так, чтобы страна оказалась перед камерой
+        const dir = featureDirection(f);
+        focuser.start(dir);
       }
     };
 
-    // load geojson
+    // Загрузка geojson
     const ac = new AbortController();
     (async () => {
       try {
@@ -723,7 +733,6 @@ export const Globe3D = ({
 
         drawMap(idx, selectedRef.current, hoveredRef.current);
 
-        // если selectedCca2 уже был задан родителем
         const code = normalizeISO2(selectedCca2) ?? null;
         const f = code ? map.get(code) ?? null : null;
         applySelectionRef.current?.(f);
@@ -734,53 +743,157 @@ export const Globe3D = ({
       }
     })();
 
-    // picker
+    // Пикер
     const { pickAt } = createPicker(camera, world, globe, idxRef);
 
-    // pointer handlers
-    const activePointers = new Set<number>();
-    let downX = 0,
-      downY = 0,
-      downT = 0,
-      moved = false;
+    // Resize / camera distances
+    const stopResize = createResizeWatcher(
+      canvas,
+      renderer,
+      camera,
+      setDPR,
+      baseDistRef,
+      camDistRef,
+      minDistRef,
+      maxDistRef
+    );
+
+    // ── Управление: drag yaw/pitch, wheel и pinch-zoom
+    const activePointers = new Map<number, { x: number; y: number }>();
+    let downX = 0;
+    let downY = 0;
+    let downT = 0;
+    let moved = false;
+    let lastMoveX = 0;
+    let lastMoveY = 0;
+
+    const pinchRef: { active: boolean; startDist: number; curDist: number } = {
+      active: false,
+      startDist: 0,
+      curDist: 0,
+    };
+
+    const qYaw = new THREE.Quaternion();
+    const qPitch = new THREE.Quaternion();
+    const axisLocalY = new THREE.Vector3(0, 1, 0);
+    const axisRightWorld = new THREE.Vector3();
+
+    const getCameraRight = () => {
+      const forward = camera.getWorldDirection(new THREE.Vector3()).normalize();
+      return axisRightWorld.copy(forward).cross(camera.up).normalize();
+    };
+
+    const applyDrag = (dx: number, dy: number) => {
+      const yaw = dx * NAV.dragYawPerPx;
+      qYaw.setFromAxisAngle(axisLocalY, yaw);
+      world.quaternion.multiply(qYaw); // локальный yaw
+
+      const right = getCameraRight();
+      const pitch = dy * NAV.dragPitchPerPx;
+      qPitch.setFromAxisAngle(right, pitch);
+      world.quaternion.premultiply(qPitch); // мировой pitch
+
+      world.quaternion.normalize();
+    };
+
+    const zoomByFactor = (factor: number) => {
+      const next = THREE.MathUtils.clamp(
+        camera.position.length() * factor,
+        minDistRef.current,
+        maxDistRef.current
+      );
+      camDistRef.current = next;
+    };
 
     const onPointerDown = (ev: PointerEvent) => {
       idle.onStart();
       focuser.cancel();
-      activePointers.add(ev.pointerId);
-      if (ev.isPrimary) {
+
+      activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+      if (activePointers.size === 1) {
         downX = ev.clientX;
         downY = ev.clientY;
+        lastMoveX = ev.clientX;
+        lastMoveY = ev.clientY;
         downT = performance.now();
         moved = false;
+      } else if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        const dx = pts[0].x - pts[1].x;
+        const dy = pts[0].y - pts[1].y;
+        pinchRef.startDist = Math.hypot(dx, dy);
+        pinchRef.curDist = pinchRef.startDist;
+        pinchRef.active = true;
+      }
+    };
+
+    const onPointerMove = (ev: PointerEvent) => {
+      const p = activePointers.get(ev.pointerId);
+      if (!p) return;
+
+      p.x = ev.clientX;
+      p.y = ev.clientY;
+
+      if (activePointers.size === 1) {
+        const dx = ev.clientX - lastMoveX;
+        const dy = ev.clientY - lastMoveY;
+        lastMoveX = ev.clientX;
+        lastMoveY = ev.clientY;
+
+        if (!moved) {
+          const mdx = ev.clientX - downX;
+          const mdy = ev.clientY - downY;
+          if (mdx * mdx + mdy * mdy > NAV.clickPxTolerance ** 2) moved = true;
+        }
+
+        applyDrag(dx, dy);
+      } else if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        const dx = pts[0].x - pts[1].x;
+        const dy = pts[0].y - pts[1].y;
+        const dist = Math.hypot(dx, dy);
+
+        if (pinchRef.active && pinchRef.startDist > 0) {
+          const delta = dist - pinchRef.curDist;
+          const factor = Math.exp((-delta * NAV.pinchZoomStrength) / 100);
+          zoomByFactor(factor);
+        }
+        pinchRef.curDist = dist;
       }
     };
 
     const onPointerUp = (ev: PointerEvent) => {
       activePointers.delete(ev.pointerId);
-      if (!ev.isPrimary) {
-        idle.onEnd();
-        return;
+
+      if (activePointers.size < 2) {
+        pinchRef.active = false;
+        pinchRef.startDist = 0;
+        pinchRef.curDist = 0;
       }
-      const dt = performance.now() - downT;
-      const isTap =
-        !moved && dt <= NAV.clickMsTolerance && activePointers.size === 0;
-      if (isTap) {
-        const rect = renderer.domElement.getBoundingClientRect();
-        const f = pickAt(ev.clientX, ev.clientY, rect);
-        if (f) {
-          applySelectionRef.current?.(f);
-          const iso2 = iso2FromProps(f.props) ?? null;
-          setSelectedRef.current?.(iso2);
+
+      if (activePointers.size === 0 && ev.isPrimary) {
+        const dt = performance.now() - downT;
+        const isTap = !moved && dt <= NAV.clickMsTolerance;
+        if (isTap) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          const f = pickAt(ev.clientX, ev.clientY, rect);
+          if (f) {
+            applySelectionRef.current?.(f);
+            const iso2 = iso2FromProps(f.props) ?? null;
+            setSelectedRef.current?.(iso2);
+          }
         }
+        moved = false;
       }
-      moved = false;
+
       idle.onEnd();
     };
 
     const onPointerCancel = (ev: PointerEvent) => {
       activePointers.delete(ev.pointerId);
       moved = false;
+      pinchRef.active = false;
       idle.onEnd();
     };
 
@@ -793,17 +906,8 @@ export const Globe3D = ({
       }
     };
 
-    const onPointerMove = (ev: PointerEvent) => {
-      // DRAG: есть зажатый указатель — отслеживаем смещение, hover не считаем
-      if (activePointers.size > 0) {
-        if (!ev.isPrimary) return;
-        const dx = ev.clientX - downX;
-        const dy = ev.clientY - downY;
-        if (dx * dx + dy * dy > NAV.clickPxTolerance ** 2) moved = true;
-        return;
-      }
-
-      // HOVER: без зажатых указателей — подсветка
+    const onHoverMove = (ev: PointerEvent) => {
+      if (activePointers.size > 0) return;
       const rect = renderer.domElement.getBoundingClientRect();
       const f = pickAt(ev.clientX, ev.clientY, rect);
       if (hoveredRef.current !== f) {
@@ -814,7 +918,11 @@ export const Globe3D = ({
       }
     };
 
-    const onWheel = () => idle.markInput();
+    const onWheel = (ev: WheelEvent) => {
+      idle.markInput();
+      const factor = Math.exp(ev.deltaY * NAV.wheelZoomStrength);
+      zoomByFactor(factor);
+    };
 
     const dom = renderer.domElement;
     dom.addEventListener('pointerdown', onPointerDown);
@@ -822,52 +930,45 @@ export const Globe3D = ({
     dom.addEventListener('pointercancel', onPointerCancel);
     dom.addEventListener('pointerleave', onPointerLeave);
     dom.addEventListener('pointermove', onPointerMove);
+    dom.addEventListener('pointermove', onHoverMove);
     dom.addEventListener('wheel', onWheel, { passive: true });
 
-    controls.addEventListener('start', idle.onStart);
-    controls.addEventListener('end', idle.onEnd);
-
-    // resize / animation
-    const stopResize = createResizeWatcher(
-      canvas,
-      renderer,
-      camera,
-      controls,
-      setDPR
-    );
-
+    // animation
     let lastT = 0;
     renderer.setAnimationLoop((t: number) => {
       if (!lastT) lastT = t;
       const dt = (t - lastT) / 1000;
       lastT = t;
 
-      controls.update();
       focuser.update(t);
       idle.update(t, dt);
+
+      if (camDistRef.current > 0) camera.position.setLength(camDistRef.current);
+      camera.lookAt(0, 0, 0);
 
       renderer.render(scene, camera);
     });
 
     return () => {
       ac.abort();
-      stopResize();
-
-      controls.removeEventListener('start', idle.onStart);
-      controls.removeEventListener('end', idle.onEnd);
+      const parent = dom.parentElement;
+      if (parent) {
+        // noop, just to keep TypeScript happy if you later attach more nodes
+      }
 
       dom.removeEventListener('pointerdown', onPointerDown);
       dom.removeEventListener('pointerup', onPointerUp);
       dom.removeEventListener('pointercancel', onPointerCancel);
       dom.removeEventListener('pointerleave', onPointerLeave);
       dom.removeEventListener('pointermove', onPointerMove);
+      dom.removeEventListener('pointermove', onHoverMove);
       dom.removeEventListener('wheel', onWheel);
 
       renderer.setAnimationLoop(null);
       disposeAll(scene);
-      controls.dispose();
       renderer.dispose();
       mapTex.dispose();
+      stopResize();
     };
   }, [canvasId]);
 
